@@ -116,7 +116,7 @@ def placeholder_predictor_demo(trip):
     unique_user_inputs = edb.get_analysis_timeseries_db().find({"user_id": user}).distinct("data.user_input")
     random_user_input = random.choice(unique_user_inputs) if random.randrange(0,10) > 0 else []
 
-    logging.debug(f"In placeholder_predictor_demo: ound {len(unique_user_inputs)} for user {user}, returning value {random_user_input}")
+    logging.debug(f"In placeholder_predictor_demo: found {len(unique_user_inputs)} for user {user}, returning value {random_user_input}")
     return [{"labels": random_user_input, "p": random.random()}]
 
 # Non-placeholder implementation. First bins the trips, and then clusters every bin
@@ -125,3 +125,68 @@ def placeholder_predictor_demo(trip):
 # Models are built using evaluation_pipeline.py and build_save_model.py
 def predict_two_stage_bin_cluster(trip):
     return lp.predict_labels(trip)
+
+# Helper function for section_to_trip_mode predictor
+# Transforms a dictionary of PredictedModeTypes : probability to a dictionary of trip_confirm_options.MODE : probability
+def map_raw_mode_to_rich_mode(trip, raw_dict):
+    import emission.core.wrapper.modeprediction as ecwm
+    # TODO calculate this based on the user's prior trip distribution (that's why we pass in the trip object)
+    transform = {
+        ecwm.PredictedModeTypes.UNKNOWN: {},
+        ecwm.PredictedModeTypes.WALKING: {"walk": 1},
+        ecwm.PredictedModeTypes.BICYCLING: {"bike": 0.4, "bikeshare": 0.2, "pilot_ebike": 0.4},  # Maybe we could distinguish between bike and ebike by speed or variability in speed or something?
+        ecwm.PredictedModeTypes.BUS: {"bus": 1},
+        ecwm.PredictedModeTypes.TRAIN: {"train": 1},
+        ecwm.PredictedModeTypes.CAR: {"drove_alone": 0.6, "shared_ride": 0.3, "taxi": 0.05, "free_shuttle": 0.05},
+        ecwm.PredictedModeTypes.AIR_OR_HSR: {}  # Currently we don't seem to have a MODE option for this
+    }
+
+    rich_dict = {}
+    for raw_mode,prob in raw_dict.items():
+        transformed = transform[ecwm.PredictedModeTypes[raw_mode]]
+        for rich_mode in transformed: transformed[rich_mode] *= prob
+        rich_dict.update(transformed)
+    return rich_dict
+
+
+# Predict trip mode by finding the most significant section and using the previously inferred section modes
+def section_to_trip_mode(trip):
+    import numpy as np
+    import pandas as pd
+
+    import emission.storage.decorations.trip_queries as esdt
+    import emission.storage.decorations.section_queries as esds
+
+    # Formula to determine how significant a given section is compared to another
+    # TODO tune this (by adjusting the coefficients or otherwise) or replace with an existing work
+    sorter = lambda section: 1.0*section["data"]["duration"]+1.0*section["data"]["distance"]
+
+    # Confirmedtrip has a "primary_section" field that is currently unused.
+    # For now, I don't care about it; I'm trying to get this implemented very quickly.
+    # TODO Later, we might apply sorter elsewhere and store the result in primary_section.
+    sections = esdt.get_cleaned_sections_for_trip(trip["user_id"], trip["data"]["cleaned_trip"])
+    sections.sort(key=sorter, reverse=True)
+
+    # We calculate how sure we are that a given section is actually the primary section by first calculating
+    # how significant it is by the metric defined above, applying an exponent to increase the larger values
+    # and decrease the smaller values, and normalizing so the sum is 1. For instance, if our raw significances
+    # by sorter are [5000, 4000, 1000], an exponent of 5.0 gives us confidences of [0.75, 0.25, 0.00].
+    # An exponent of 2.7 would give us [0.64, 0.35, 0.01].
+    # I made this procedure up; it might not be the best way to do this.
+    confidences = np.array([[sorter(section)] for section in sections])  # This being a column vector will help us later
+    confidences **= 5.0  # TODO the exponent can be tuned
+    confidences /= np.sum(confidences)
+
+    # Now we get a dictionary of predicted modes : probabilities for all sections, weight the mode probabilities by the section probabilities, and sum
+    prediction_dicts = [esds.get_inferred_mode_entry(trip["user_id"], section.get_id())["data"]["predicted_mode_map"] for section in sections]
+    prediction_matrix = pd.DataFrame(prediction_dicts)
+    prediction_matrix *= confidences  # Weight each mode's probabilities by our confidence that that is the primary mode
+    raw_predictions = prediction_matrix.sum(axis=0)  # Sum across sections
+    np.testing.assert_almost_equal(raw_predictions.sum(), 1)
+
+    # Convert PredictedModeTypes to trip_confirm_options.MODE and assemble into the prediction data structure
+    rich_modes = map_raw_mode_to_rich_mode(trip, raw_predictions.to_dict())
+    rich_modes_sorted = list(rich_modes.items())
+    rich_modes_sorted.sort(key = lambda x: x[1], reverse=True)  # Sort descending by probability
+    prediction = [{"labels": {"mode_confirm": mode}, "p": p} for mode,p in rich_modes_sorted]
+    return prediction

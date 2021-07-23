@@ -60,13 +60,13 @@ class LabelInferencePipeline:
             # Create an inferred trip
             cleaned_trip_dict = copy.copy(cleaned_trip)["data"]
             inferred_trip = ecwe.Entry.create_entry(user_id, "analysis/inferred_trip", cleaned_trip_dict)
+            inferred_trip["data"]["cleaned_trip"] = cleaned_trip.get_id()
             
             # Run the algorithms and the ensemble, store results
             results = self.compute_and_save_algorithms(inferred_trip)
             ensemble = self.compute_and_save_ensemble(inferred_trip, results)
 
             # Put final results into the inferred trip and store it
-            inferred_trip["data"]["cleaned_trip"] = cleaned_trip.get_id()
             inferred_trip["data"]["inferred_labels"] = ensemble["prediction"]
             self.ts.insert(inferred_trip)
 
