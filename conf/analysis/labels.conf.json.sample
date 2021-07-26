@@ -1,0 +1,25 @@
+{
+    "mode_confirm": [
+        "walk",
+        "bike",
+        "drove_alone",
+        "shared_ride",
+        "taxi",
+        "bus",
+        "train",
+        "free_shuttle"
+    ],
+    "purpose_confirm": [
+        "home",
+        "work",
+        "school",
+        "transit_transfer",
+        "shopping",
+        "meal",
+        "pick_drop",
+        "personal_med",
+        "exercise",
+        "entertainment",
+        "religious"
+    ]
+}

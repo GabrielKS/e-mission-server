@@ -1,6 +1,5 @@
 # Standard imports
 import logging
-import random
 import copy
 
 # Our imports
@@ -12,18 +11,20 @@ import emission.core.wrapper.entry as ecwe
 import emission.analysis.classification.inference.labels.inferrers as eacili
 import emission.analysis.classification.inference.labels.ensembles as eacile
 
+# Select which type of logging predictions get sent to
+PREDICTIONS_LOGGER = logging.info
 
 # For each algorithm in ecwl.AlgorithmTypes that runs on a trip (e.g., not the ensemble, which
 # runs on the results of other algorithms), primary_algorithms specifies a corresponding
 # function in eacili to run. This makes it easy to plug in additional algorithms later.
 primary_algorithms = {
-    ecwl.AlgorithmTypes.TWO_STAGE_BIN_CLUSTER: eacili.predict_two_stage_bin_cluster,
-    ecwl.AlgorithmTypes.PLACEHOLDER_PREDICTOR_DEMO: eacili.placeholder_predictor_demo
+    ecwl.AlgorithmTypes.SECTION_TO_TRIP_MODE: eacili.section_to_trip_mode,
+    ecwl.AlgorithmTypes.PLACEHOLDER_2: eacili.placeholder_predictor_2,
 }
 
 # ensemble specifies which algorithm in eacile to run.
 # This makes it easy to test various ways of combining various algorithms.
-ensemble = eacile.ensemble_real_and_placeholder
+ensemble = eacile.array_multiply_ensemble
 
 
 # Does all the work necessary for a given user
@@ -56,6 +57,8 @@ class LabelInferencePipeline:
         self.ts = esta.TimeSeries.get_time_series(user_id)
         self.toPredictTrips = esda.get_entries(
             esda.CLEANED_TRIP_KEY, user_id, time_query=time_range)
+        
+        n = 0  # For debugging
         for cleaned_trip in self.toPredictTrips:
             # Create an inferred trip
             cleaned_trip_dict = copy.copy(cleaned_trip)["data"]
@@ -64,7 +67,16 @@ class LabelInferencePipeline:
             
             # Run the algorithms and the ensemble, store results
             results = self.compute_and_save_algorithms(inferred_trip)
-            ensemble = self.compute_and_save_ensemble(inferred_trip, results)
+            ensemble = self.compute_and_save_ensemble(inferred_trip, copy.deepcopy(results))
+
+            # Log predictions to the specified destination
+            if PREDICTIONS_LOGGER is not None:
+                PREDICTIONS_LOGGER(f"Trip {n}, inferred trip ID={inferred_trip.get_id()}:")
+                for i,k in enumerate(primary_algorithms): PREDICTIONS_LOGGER(f"{k}:\n{results[i]['prediction']}")
+                PREDICTIONS_LOGGER("ensemble:")
+                for entry in ensemble['prediction']: PREDICTIONS_LOGGER(entry)
+                PREDICTIONS_LOGGER("")
+            n += 1
 
             # Put final results into the inferred trip and store it
             inferred_trip["data"]["inferred_labels"] = ensemble["prediction"]
@@ -90,9 +102,7 @@ class LabelInferencePipeline:
             predictions.append(lp)
         return predictions
 
-    # Combine all our predictions into a single ensemble prediction.
-    # As a placeholder, we just take the first prediction.
-    # TODO: implement a real combination algorithm.
+    # Combine all our predictions into a single ensemble prediction
     def compute_and_save_ensemble(self, trip, predictions):
         il = ecwl.Labelprediction()
         il.trip_id = trip.get_id()
